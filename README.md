@@ -1,333 +1,206 @@
-# 6b-me
+# 🏦 Banking API Implementation Guide (with Winston Logging)
 
-A beginner-friendly Express + MongoDB authentication API with:
+This guide provides a comprehensive, step-by-step walkthrough to build a secure and highly observable Banking API from scratch.
 
-- user registration and login
-- JWT-based protected route (`/users/me`)
-- password hashing with Argon2
-- request logging (optional SolarWinds forwarding)
-- centralized error handling
+---
 
-This README is written so students can implement almost the same project from scratch.
+## 🏗️ Project Architecture Overview
 
-## 1. Tech Stack
+This project is built using **Node.js**, **Express**, and **MongoDB**. It features:
 
-- Node.js (ES modules)
-- Express 5
-- MongoDB + Mongoose
-- Argon2 (password hashing)
-- JSON Web Token (`jsonwebtoken`)
-- `http-errors` + `http-status-codes`
-- Axios (for optional SolarWinds log shipping)
-- `pnpm` + `nodemon`
+- **Authentication**: JWT-based session management with `argon2` hashing.
+- **Observability**: Production-grade logging using **Winston**.
+- **Security**: Granular rate-limiting using `rate-limiter-flexible`.
+- **Database**: Mongoose for modeling and validation.
 
-## 2. Folder Structure
+---
 
-```text
-config/
-  db.js
-  solarwinds.js
-controllers/
-  auth.controller.js
-middleware/
-  auth.middleware.js
-  error.middleware.js
-  logger.middleware.js
-models/
-  user.model.js
-routes/
-  auth.routes.js
-utils/
-  jwt.js
-index.js
-```
+## 🛠️ Step-by-Step Implementation
 
-## 3. Installation and Run
+### Step 1: Project Initialization
 
-1. Install dependencies.
+1. Initialize the project:
+   ```bash
+   pnpm init
+   ```
+2. Install dependencies:
+   ```bash
+   pnpm add express mongoose jsonwebtoken argon2 cors dotenv winston rate-limiter-flexible http-errors http-status-codes
+   ```
+3. Add a development script in `package.json`:
+   ```json
+   "scripts": {
+     "dev": "nodemon index.js"
+   }
+   ```
 
-```bash
-pnpm install
-```
+### Step 2: Environment Setup
 
-2. Create `.env` in the project root.
+Create a `.env` file for your configuration:
 
 ```env
+MONGO_URI=your_mongodb_uri
 PORT=3000
-MONGO_URI=your_mongo_connection_string
-JWT_SECRET=your_super_secret_key
-JWT_EXPIRES_IN=1d
-SOLARWINDS_TOKEN=optional
+LOG_LEVEL=info
+JWT_SECRET=your_secret
+JWT_REFRESH_SECRET=your_refresh_secret
+JWT_EXPIRES_IN=5m
 ```
 
-3. Start development server.
+### Step 3: Global Winston Configuration (`config/logger.js`)
 
-```bash
-pnpm dev
+We use Winston to centralize all application logs.
+
+```javascript
+import winston from "winston";
+
+const { combine, timestamp, printf, colorize, errors } = winston.format;
+
+const logFormat = printf(({ level, message, timestamp, stack }) => {
+  return `${timestamp} [${level}]: ${stack || message}`;
+});
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || "info",
+  format: combine(
+    timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
+    errors({ stack: true }),
+    logFormat,
+  ),
+  transports: [
+    new winston.transports.Console({
+      format: combine(colorize({ all: true })),
+    }),
+    new winston.transports.File({ filename: "logs/error.log", level: "error" }),
+    new winston.transports.File({ filename: "logs/combined.log" }),
+  ],
+});
+
+export default logger;
 ```
 
-4. For production mode.
+### Step 4: Request Logging Middleware (`middleware/logger.middleware.js`)
 
-```bash
-pnpm start
+This middleware captures every incoming request and logs its duration.
+
+```javascript
+import logger from "../config/logger.js";
+
+const loggerMiddleware = (req, res, next) => {
+  const startTime = Date.now();
+
+  res.on("finish", () => {
+    const duration = Date.now() - startTime;
+    const message = `${req.method} ${req.originalUrl} | ${res.statusCode} | ${duration}ms`;
+
+    switch (true) {
+      case res.statusCode >= 500:
+        logger.error(message);
+        break;
+      case res.statusCode >= 400:
+        logger.warn(message);
+        break;
+      default:
+        logger.info(message);
+        break;
+    }
+  });
+
+  next();
+};
+
+export default loggerMiddleware;
 ```
 
-## 4. How the App Boots (`index.js`)
+### Step 5: Master Error Handling (`middleware/error.middleware.js`)
 
-Startup flow:
+Centralizing error logging ensures that stack traces are always captured in your `error.log`.
 
-1. Load environment variables (`dotenv.config()`).
-2. Connect to MongoDB (`connectDB()`).
-3. Register middlewares (`cors()`, `express.json()`, `loggerMiddleware`).
-4. Mount auth routes at `/users`.
-5. Add health/base route `/`.
-6. Register `errorMiddleware` as the last middleware.
-7. Listen on `PORT` (default `3000`).
+```javascript
+import { StatusCodes } from "http-status-codes";
+import logger from "../config/logger.js";
 
-Why error middleware is last:
+const errorMiddleware = (err, req, res, next) => {
+  const statusCode = err.statusCode || 500;
+  const message = err.message || "Internal Server Error";
 
-- Express forwards thrown errors to the next error handler.
-- If placed earlier, it will not catch errors from later route handlers.
-
-## 5. Database Layer
-
-### `config/db.js`
-
-- Reads `MONGO_URI` from `.env`.
-- Throws a clear error if missing.
-- Connects with `mongoose.connect(uri)`.
-
-### `models/user.model.js`
-
-User schema fields:
-
-- `fullName`: required, trimmed string
-- `email`: required, unique, lowercased, trimmed, regex validated
-- `password`: required, minimum length 6
-
-Custom validation messages included:
-
-- `"Full name is required"`
-- `"Email is required"`
-- `"Please provide a valid email address"`
-- `"Password is required"`
-- `"Password must be at least 6 characters long"`
-
-Security behavior:
-
-- `pre("save")` hook hashes password using Argon2.
-- Hashing runs only when password is modified.
-- `comparePassword(candidatePassword)` verifies login password.
-
-## 6. JWT Utilities
-
-### `utils/jwt.js`
-
-- `getJwtSecret()` ensures `JWT_SECRET` exists.
-- `getJwtSecret()` throws a descriptive error if missing.
-- `generateToken(userId)` signs payload `{ userId }`.
-- `generateToken(userId)` uses `JWT_EXPIRES_IN` (default `1d`).
-
-## 7. Middlewares
-
-### `middleware/auth.middleware.js`
-
-- Expects header format: `Authorization: Bearer <token>`
-- Verifies token with `jwt.verify`
-- Stores decoded payload in `req.user`
-- Returns `401 Unauthorized` with `"Unauthorized"` when header/token missing.
-- Returns `401 Unauthorized` with `"Invalid or expired token"` when verification fails.
-
-### `middleware/logger.middleware.js`
-
-- Tracks request start and finish time.
-- Creates a structured log object after response is sent.
-- Calls `sendToSolarWinds(logEntry)`.
-
-### `middleware/error.middleware.js`
-
-- Central error formatter.
-- Uses `err.statusCode` or `err.status` when available.
-- Falls back to `500 Internal Server Error`.
-- Returns JSON:
-
-```json
-{
-  "success": false,
-  "message": "..."
-}
-```
-
-- Includes stack trace only when `NODE_ENV=development`.
-
-## 8. Optional Log Shipping
-
-### `config/solarwinds.js`
-
-- If `SOLARWINDS_TOKEN` is not set, it silently skips sending logs.
-- If token exists, it POSTs logs to SolarWinds collector API.
-- Errors are printed in console but do not break API responses.
-
-This keeps observability optional for classroom/local setups.
-
-## 9. Routes and Controllers
-
-### `routes/auth.routes.js`
-
-- `POST /users/register` -> `registerUser`
-- `POST /users/login` -> `loginUser`
-- `GET /users/me` -> `authMiddleware` -> `getCurrentUser`
-
-### `controllers/auth.controller.js`
-
-#### `registerUser`
-
-- Reads `fullName`, `email`, `password` from request body.
-- Creates user with `User.create(...)`.
-- Returns `201 Created` and safe user fields (no password).
-
-#### `loginUser`
-
-- Finds user by email.
-- Validates password via `comparePassword`.
-- Throws `401` (`"Invalid email or password"`) on failure.
-- Returns token and user basics on success.
-
-#### `getCurrentUser`
-
-- Uses `req.user.userId` from auth middleware.
-- Fetches user and excludes password via `.select("-password")`.
-- Throws `404` if user no longer exists.
-
-## 10. API Contract
-
-### Base URL
-
-`http://localhost:3000`
-
-### `POST /users/register`
-
-Request:
-
-```json
-{
-  "fullName": "Jane Doe",
-  "email": "jane@example.com",
-  "password": "strongPassword123"
-}
-```
-
-Success (`201`):
-
-```json
-{
-  "message": "User registered successfully",
-  "data": {
-    "id": "...",
-    "fullName": "Jane Doe",
-    "email": "jane@example.com",
-    "createdAt": "..."
+  if (statusCode >= 500) {
+    logger.error(`${req.method} ${req.originalUrl} - ${message}`, {
+      stack: err.stack,
+    });
+  } else {
+    logger.warn(`${req.method} ${req.originalUrl} - ${message}`);
   }
-}
+
+  res.status(statusCode).json({ success: false, message });
+};
+
+export default errorMiddleware;
 ```
 
-### `POST /users/login`
+### Step 6: Database Connectivity (`config/db.js`)
 
-Request:
+Ensure your database connection attempts are also logged via Winston.
 
-```json
-{
-  "email": "jane@example.com",
-  "password": "strongPassword123"
-}
-```
+```javascript
+import mongoose from "mongoose";
+import logger from "./logger.js";
 
-Success (`200`):
-
-```json
-{
-  "message": "Login successful",
-  "data": {
-    "token": "<jwt>",
-    "id": "...",
-    "fullName": "Jane Doe",
-    "email": "jane@example.com"
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    logger.info("MongoDB Connection Successful");
+  } catch (error) {
+    logger.error(`Database connection failed: ${error.message}`);
+    process.exit(1);
   }
-}
+};
 ```
 
-### `GET /users/me`
+---
 
-Header:
+## 📂 Recommended File Structure
 
-```http
-Authorization: Bearer <jwt>
+```text
+.
+├── config/
+│   ├── db.js
+│   └── logger.js
+├── controllers/
+│   └── auth.controller.js
+├── models/
+│   └── user.model.js
+├── middleware/
+│   ├── error.middleware.js
+│   ├── logger.middleware.js
+│   └── ratelimit.middleware.js
+├── routes/
+│   └── auth.routes.js
+├── logs/ (Ignored by Git)
+├── .env
+├── .gitignore
+├── index.js
+└── package.json
 ```
 
-Success (`200`):
+---
 
-```json
-{
-  "message": "User fetched successfully",
-  "data": {
-    "_id": "...",
-    "fullName": "Jane Doe",
-    "email": "jane@example.com",
-    "createdAt": "...",
-    "updatedAt": "..."
-  }
-}
-```
+## 🚦 Running the Application
 
-## 11. Common Errors Students Should Expect
+1. **Prepare Logs**: Winston will automatically create the `logs/` folder if it doesn't exist.
+2. **Start Dev Server**:
+   ```bash
+   pnpm dev
+   ```
+3. **Check Output**:
+   - Success logs will appear in `combined.log`.
+   - Error stack traces will appear in `error.log`.
 
-- Validation failure while registering:
-- by default this codebase returns an error via `errorMiddleware` (typically `500` unless status is set), and the message includes Mongoose validation text.
-- Wrong login credentials:
-- `401` with `"Invalid email or password"`.
-- Missing or invalid token:
-- `401` with `"Unauthorized"` or `"Invalid or expired token"`.
-- Missing `JWT_SECRET` or `MONGO_URI`:
-- startup/runtime error with clear message in console.
+---
 
-## 12. Quick Manual Testing (cURL)
+## ✅ Best Practices Checklist
 
-Register:
-
-```bash
-curl -X POST http://localhost:3000/users/register \
-  -H "Content-Type: application/json" \
-  -d '{"fullName":"Jane Doe","email":"jane@example.com","password":"strongPassword123"}'
-```
-
-Login:
-
-```bash
-curl -X POST http://localhost:3000/users/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"jane@example.com","password":"strongPassword123"}'
-```
-
-Get current user (replace `<TOKEN>`):
-
-```bash
-curl http://localhost:3000/users/me \
-  -H "Authorization: Bearer <TOKEN>"
-```
-
-## 13. Build This Yourself (Suggested Order)
-
-1. Setup Express app and folder structure.
-2. Add Mongo connection helper (`config/db.js`).
-3. Create user model with validation + Argon2 hooks.
-4. Add JWT utility functions.
-5. Implement register and login controllers.
-6. Add auth middleware and `/users/me` route.
-7. Add error middleware and use `http-errors` for consistency.
-8. Add logger middleware and optional SolarWinds forwarding.
-9. Test all endpoints with Postman or cURL.
-
-## Notes
-
-- `accountNumber` has been removed from model and auth responses.
-- Use `pnpm` for consistency with this project.
+- [x] Use `pnpm` for faster, safer dependency management.
+- [x] Always prefer Winston `logger.info/error` over standard `console.log`.
+- [x] Keep sensitive keys in `.env` and never upload them.
+- [x] Use `res.on('finish')` to log requests only _after_ theyre processed.
